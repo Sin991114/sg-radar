@@ -1,26 +1,26 @@
 # 狮城雷达 SG Radar
 
-新加坡活动与优惠聚合器：每天抓取 7 个来源，汇总成一个可随时打开的本地网页，
-并通过**持续追踪**自动识别"长期营销"型假优惠（比如天天都有的 "up to 90% off"）。
+新加坡活动与优惠聚合器：每天抓取 8 个来源，归一化成统一的「商家·优惠·价格」，
+并自动识别"长期营销"型假优惠（时间轴复发检测 + LLM 真伪判断双保险）。
 
-## 快速开始
+## 在线版（全自动，推荐）
+
+- **每日看板**：https://sin991114.github.io/sg-radar/ （手机/电脑随时开）
+- **仓库**：https://github.com/Sin991114/sg-radar
+- GitHub Actions 每天 **09:00 SGT** 自动跑：抓取 → 归一化 → 更新历史库 → 发布页面
+- 手动触发：仓库 → Actions → SG Radar daily update → Run workflow
+- 密钥存在仓库 Secrets（TIKHUB_API_KEY / OPENROUTER_API_KEY），不在代码里
+- `data/tracker.db` 随每次运行提交回仓库 —— 历史即资产，复发检测越跑越准
+
+## 本地运行（可选备用）
 
 ```
 双击 update.bat        → 抓取最新数据并重新生成页面
-打开 site\index.html   → 浏览（可加入浏览器书签/固定标签页）
+打开 site\index.html   → 浏览
 ```
 
-首次运行会自动创建 `.venv` 并安装依赖。
-
-## 每天自动更新（可选）
-
-在命令行执行一次（每天上午 9 点自动抓取）：
-
-```
-schtasks /create /tn "SG Radar Daily" /tr "\"C:\Users\sinji\Desktop\DS_project\SG Event\update.bat\"" /sc daily /st 09:00
-```
-
-删除：`schtasks /delete /tn "SG Radar Daily"`
+首次运行会自动创建 `.venv` 并安装依赖。注意：本地跑完后 DB 与云端会分叉，
+想同步就 `git pull` 先拉云端的最新数据再跑。
 
 ## 数据来源
 
