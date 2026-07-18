@@ -6,10 +6,75 @@ as one source among many) folds into one filterable list. Filters: 品种
 """
 from __future__ import annotations
 
+import itertools
 import json
+import re
 from pathlib import Path
 
 LABEL_RANK = {"limited": 0, "watch": 1, "evergreen": 2}
+
+
+# ---- display-level dedup (DB keeps every row; only the view merges) ---------
+
+def _bigrams(s: str) -> set:
+    s = re.sub(r"[\s\W_]+", "", (s or "").lower())
+    return {s[i:i + 2] for i in range(len(s) - 1)} if len(s) > 1 else ({s} if s else set())
+
+
+def _containment(a: str, b: str) -> float:
+    A, B = _bigrams(a), _bigrams(b)
+    if not A or not B:
+        return 0.0
+    return len(A & B) / min(len(A), len(B))
+
+
+def assign_groups(records: list[dict]) -> dict:
+    """Cluster deal/xhs rows that describe the same promo (same deal posted
+    by several Xiaohongshu bloggers / several sites). Same merchant+price
+    alone is NOT enough — McDonald's had two different $9.90 deals — so a
+    text-similarity check always applies. Returns {record_id: group_id}."""
+    def canon_price(p: str) -> str:
+        p = (p or "").strip().lower().replace(" ", "")
+        return "free" if p in ("free", "免费", "$0", "0") else p
+
+    items = []
+    for r in records:
+        if r["kind"] not in ("deal", "xhs"):
+            continue
+        n = r.get("norm_obj") or {}
+        m = (n.get("merchant") or "").strip().lower()
+        o = n.get("offer") or r.get("title") or ""
+        p = canon_price(n.get("price"))
+        items.append((r["id"], m, o, p, f"{m}{o}"))
+
+    parent = {i[0]: i[0] for i in items}
+
+    def find(x):
+        root = x
+        while parent[root] != root:
+            root = parent[root]
+        while parent[x] != root:
+            parent[x], x = root, parent[x]
+        return root
+
+    for (ia, ma, oa, pa, fa), (ib, mb, ob, pb, fb) in itertools.combinations(items, 2):
+        same = False
+        if ma and ma == mb:
+            oc = _containment(oa, ob)
+            if pa and pa == pb and oc >= 0.3:
+                same = True          # same merchant + same price + overlapping offer
+            elif oc >= 0.55:
+                same = True          # same merchant + near-same offer text
+        elif _containment(fa, fb) >= 0.65:
+            # different/absent merchant but same story — unless both declare
+            # prices that disagree (e.g. SIA "From S$208" vs DBS "S$50 Off":
+            # long shared brand text, genuinely different deals)
+            if not (pa and pb and pa != pb):
+                same = True
+        if same:
+            parent[find(ia)] = find(ib)
+
+    return {i[0]: find(i[0]) for i in items}
 
 
 def _ok(v) -> bool:
@@ -17,7 +82,7 @@ def _ok(v) -> bool:
     return bool(v) and str(v).strip().lower() not in ("null", "none", "nil", "n/a", "-")
 
 
-def _slim(r: dict) -> dict:
+def _slim(r: dict, groups: dict | None = None) -> dict:
     published = r.get("published") or ""
     rec = published or r.get("date_start") or r.get("first_seen") or ""
     out = {
@@ -48,11 +113,14 @@ def _slim(r: dict) -> dict:
             out["pr"] = n["price"].strip()
         if _ok(n.get("auth")):
             out["la"] = n["auth"].strip()   # LLM 真伪: real_limited/evergreen_marketing/promo_content/info/event
+    if groups and r["id"] in groups:
+        out["g"] = groups[r["id"]]
     return out
 
 
 def render(records: list[dict], now, out_path) -> None:
-    data = [_slim(r) for r in records]
+    groups = assign_groups(records)
+    data = [_slim(r, groups) for r in records]
     payload = json.dumps(data, ensure_ascii=False,
                          separators=(",", ":")).replace("<", "\\u003c")
     html = (TEMPLATE
@@ -175,6 +243,7 @@ ul{list-style:none;margin-top:8px}
 .atag.am{color:var(--red);border:1px solid var(--red)}
 .atag.pc{color:var(--amber);border:1px solid var(--amber)}
 .atag.if{color:var(--ink2);border:1px solid var(--ink2)}
+.dupchip{background:var(--chip);border-radius:999px;padding:0 7px;font-size:10.5px;color:var(--ink2);cursor:help}
 .row.eve{opacity:.5} .row.eve .t{text-decoration:line-through} .row.eve:hover{opacity:.9}
 .empty{padding:44px 12px;text-align:center;color:var(--ink2)}
 footer{margin-top:44px;padding-top:14px;border-top:1px solid var(--line);font-size:12px;color:var(--ink2);line-height:1.85}
@@ -335,6 +404,8 @@ function row(r,i){
   }
   if((r.k==="xhs"||r.k==="article")&&(r.ds||r.de)) bits.push("📅提到"+md(r.de||r.ds));
   if(AUTHTAG[r.la]){const[tt,cc]=AUTHTAG[r.la];bits.push(`<span class="atag ${cc}">${tt}</span>`);}
+  if(r.dups&&r.dups.length)
+    bits.push(`<span class="dupchip" title="${esc(r.dups.map(d=>d.sn+"："+d.t).join("\\n"))}">+${r.dups.length} 同款</span>`);
   let badge="";
   if(r.k==="deal"){const l=r.a?r.a.l:"watch";
     badge=l==="limited"?'<span class="badge lim">限时</span>':l==="evergreen"?'<span class="badge eve">长期营销</span>':'<span class="badge wat">待观察</span>';}
@@ -352,6 +423,15 @@ function render(){
   if(state.sort==="new") rows.sort((a,b)=>(b.rec||"").localeCompare(a.rec||""));
   else if(state.sort==="deadline") rows.sort((a,b)=>(a.de||big).localeCompare(b.de||big));
   else rows.sort((a,b)=>likeNum(b.lk)-likeNum(a.lk));
+  // display-level dedup: keep the first row of each group in current sort,
+  // fold the rest into a "+N 同款" chip on the representative
+  const byG=new Map(), kept=[];
+  for(const r of rows){
+    if(r.g && byG.has(r.g)){ byG.get(r.g).dups.push(r); continue; }
+    r.dups=[]; if(r.g) byG.set(r.g,r);
+    kept.push(r);
+  }
+  rows=kept;
   $("#list").innerHTML = rows.length?rows.map(row).join(""):`<li class="empty">没有匹配的条目 — 换个筛选试试</li>`;
   $("#count").textContent = rows.length+" 条";
 }
